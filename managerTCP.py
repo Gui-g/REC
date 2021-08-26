@@ -9,12 +9,12 @@ import operator
 
 class manager:
     def __init__(self):
-        self.manager_buffer = buffer(4096)
         self.connection_control = 0
         self.MTU = 100
         self.server_adress : tuple
         self.socket : socket
         self.full_data = ''
+        self.manager_buffer = buffer(1024, self.MTU)
 
     def create_socket(self):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -45,23 +45,35 @@ class manager:
             
             final_package = 0
             start = self.manager_buffer.snd_nxt
+            goal = self.manager_buffer.usable_wnd
 
             #while not over
             while not final_package:
 
+                #10 -> usable_wmd = 19 => 19 (10+19 = 29) -> 19 => 19 (29+19 = 48), mas acaba no 38
+                #if (start + self.manager_buffer.usable_wnd) > len(self.manager_buffer.data_list)
+                #then limite = len() [0:20] => [20:40]
                 #send window
-                for i in range(start, start+self.manager_buffer.usable_wnd-1):
+                for i in range(start, start+goal-1):
+                    print(i)
                     self.manager_buffer.data_list[i] = self.client_pack(self.manager_buffer.data_list[i])
                     self.send_data(self.manager_buffer.data_list[i], self.server_adress)
                     self.manager_buffer.snd_nxt = self.manager_buffer.snd_nxt + 1
+
+                    if self.decode_header(self.manager_buffer.data_list[i]).FIN:
+                        break
                 
                 #receive window
                 rsp_list = []
-                for i in range(0, self.manager_buffer.usable_wnd-1):
+                print(goal)
+                for i in range(0, goal-1):
                     #receive response
                     print(i)
                     response, address = self.receive_data()
                     rsp_list.append(response)
+
+                    if self.decode_header(response).FIN:
+                        break
 
                 #sort all responses by ack for window-checking
                 rsp_list = self.sort_b_list(rsp_list)
@@ -82,6 +94,11 @@ class manager:
 
                 self.manager_buffer.usable_wnd = self.manager_buffer.snd_una + self.manager_buffer.snd_wnd - self.manager_buffer.snd_nxt
                 start = self.manager_buffer.snd_nxt
+                goal = self.manager_buffer.usable_wnd
+
+                if goal + start > len(self.manager_buffer.data_list):
+                    goal = len(self.manager_buffer.data_list)
+
         #NOT SYNACK? TO DO
             
 
@@ -101,11 +118,11 @@ class manager:
             #answer SYNACK and begin
             self.send_data(answer, address)
             self.manager_buffer.snd_nxt = 1
-
+            start = self.manager_buffer.snd_una
+            
             #while package has not been fully assembled
             while not final_package:
 
-                start = self.manager_buffer.snd_una
                 for i in range(0, self.manager_buffer.usable_wnd-1):
                     data, address = self.receive_data()
                     data = self.server_pack(data)
@@ -119,6 +136,7 @@ class manager:
 
                         if data_head.FIN:
                             final_package = 1
+                            break
                     else:
                         continue
 
@@ -129,27 +147,35 @@ class manager:
                     self.send_data(self.manager_buffer.data_list[i], address)
                     self.manager_buffer.snd_una = self.manager_buffer.snd_una + 1
 
-                start = self.manager_buffer.snd_una 
-                self.manager_buffer.usable_wnd = self.manager_buffer.snd_una + self.manager_buffer.snd_wnd - self.manager_buffer.snd_nxt
+                    if self.decode_header(self.manager_buffer.data_list[i]).FIN:
+                        print('breaked')
+                        break
 
-                #if window is full clear space by assembling
-                if self.manager_buffer.usable_wnd == 0:
-                    for data in self.manager_buffer.data_list:
-                        self.assemble_data(data)
+                self.manager_buffer.usable_wnd = 1 + self.manager_buffer.snd_una + self.manager_buffer.snd_wnd - self.manager_buffer.snd_nxt
 
-            for data in self.manager_buffer.data_list:
-                self.assemble_data(data)
+                #if window is full or near clear space by assembling
+                if self.manager_buffer.usable_wnd == 0 or self.manager_buffer.remaining_slots(self.MTU) < self.manager_buffer.usable_wnd:
+                    print('assembled?!\n')
+                    self.assemble_data()
+                    self.manager_buffer.snd_nxt = 1
+                    self.manager_buffer.snd_una = 0
+
+                start = self.manager_buffer.snd_una
+
+            self.assemble_data()
 
         self.manager_buffer.data_list.clear()
         
         print(self.full_data)
         self.full_data = ""
+        #slow starter etc define qual o usable_wind inicial
+        self.manager_buffer.usable_wnd = 5
 
 
     def send_data(self, data, address):
         data_header = self.decode_header(data)
         
-        self.update_buffer(data_header.SEQ, data_header.LEN, 1)
+        self.update_buffer(data_header, 1)
         
         sent = self.socket.sendto(data, address)
         print('sent {} bytes to {}'.format(sent, address))
@@ -162,7 +188,7 @@ class manager:
 
         data_header = self.decode_header(data)
 
-        self.update_buffer(data_header.SEQ, data_header.LEN, 0)
+        self.update_buffer(data_header, 0)
 
         return (data, address)
 #
@@ -225,11 +251,11 @@ class manager:
             self.manager_buffer.data_list.append(try_pack)
             return self.manager_buffer 
 
-    def assemble_data(self, data):
-        data_block = self.decode_data(data)
-        del self.manager_buffer.data_list[self.manager_buffer.data_list.index(data)]
-
-        self.full_data = self.full_data + data_block
+    def assemble_data(self):
+        for data_block in self.manager_buffer.data_list:
+            data_block = self.decode_data(data_block)
+            self.full_data = self.full_data + data_block
+        self.manager_buffer.data_list.clear()
 
     def connection_start(self, SEQ):
         fst_header = self.build_header(0,0,0,0,0,0)
@@ -250,6 +276,7 @@ class manager:
 
         if data.header.SYN:
             data.header.ACK = self.manager_buffer.next_ack
+            data.header.RWND = self.manager_buffer.MAX_SIZE
             return self.byte_my_pack(self.build_pack(data.header, data.data))
         else:
             return self.byte_my_pack(self.build_pack(data.header, data.data))
@@ -260,13 +287,18 @@ class manager:
             pack.header.SEQ = self.manager_buffer.next_seq
             pack.header.ACK = self.manager_buffer.next_ack
             pack.header.LEN = len(pack.data)
+            pack.header.RWND = self.manager_buffer.window
 
     #flag => 1 = sending (rdy next seq) ; 0 = receiving (rdy next ack)
-    def update_buffer(self, SEQ, LEN, flag):
+    def update_buffer(self, header : header, flag):
         if flag:
-            self.manager_buffer.next_seq = SEQ + LEN
+            self.manager_buffer.next_seq = header.SEQ + header.LEN
         else:
-            self.manager_buffer.next_ack = SEQ + LEN
+            self.manager_buffer.next_ack = header.SEQ + header.LEN
+            self.manager_buffer.update_window(header.LEN)
+
+            if header.SYN and header.ACK != 0:
+                self.manager_buffer.window = header.RWND
 
     def sort_b_list(self, b_list):
         in_list = [self.decode_pack(x) for x in b_list]
