@@ -172,7 +172,7 @@ class manager:
         self.manager_buffer.usable_wnd = 5
 
 
-    def send_data(self, data, address):
+    def send_data(self, data : bytes, address : tuple):
         data_header = self.decode_header(data)
         
         self.update_buffer(data_header, 1)
@@ -303,7 +303,6 @@ class manager:
     def sort_b_list(self, b_list):
         in_list = [self.decode_pack(x) for x in b_list]
 
-        #Procurar como sort ou mudar tudo depois
         in_list.sort(key = lambda x: x.header.ACK)
 
         b_list = [self.byte_my_pack(x) for x in in_list]
