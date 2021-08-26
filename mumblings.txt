@@ -15,3 +15,20 @@ ordena pacotes = ok
 TODO:
 implementar tamanho da janela
 implementar slow start + fast rec (<< timeout)
+
+-----------------------------------------------------------------------------------
+tamanho da janela: MAX = 4096
+
+MAX / MTU = numero de pacotes que eu posso receber
+
+Server => win = MAX (SYNACK => win = MAX)
+-> recebe dado => monta resposta => win = win - len(dado)
+<repete>
+-> janela full ou janela < proximos envios => limpa buffer (monta dados)
+# => limpa janela inteira => volta a receber indo do estado inicial da função
+# => limpa janela o bastante para o proximo envio => acha o ponto e sempre volta
+
+Cliente
+-> envia SYN com win = 0 
+-> recebe resposta => win = window buffer
+-> envia pacote win = window buffer

@@ -8,20 +8,29 @@ class buffer:
         self.next_seq = 0
         self.next_ack = 0
         self.snd_una = 0
-        self.snd_wnd = int(MAX_SIZE/MTU)
+        self.snd_wnd = 0
         self.snd_nxt = 0
-        self.usable_wnd = 5
+        self.cwnd = 1
 
-    #cria um buffer de 1024 MTU de 100 => max 10 pacotes
-    #snd_wnd = fixo 20 => depois do primeiro loop ele manda 0 + 20 - 0 => usable_wnd = 20
+    # cria um buffer de 1024 MTU de 100 => max 10 pacotes
+    # snd_wnd = fixo 20 => depois do primeiro loop ele manda 0 + 20 - 0 => cwnd = 20
 
-    def current_window(self):
-        current_size = 0
+    def crnt_snd_wnd(self, MTU):
+        limit = 0
+        n_packs = 0
 
-        for data in self.data_list:
-            current_size = current_size + len(data)
+        for data in self.data_list[1:]:
+            limit = limit + len(data)
+
+            if limit > MTU:
+                break
+
+            n_packs = n_packs + 1
         
-        return
+        self.snd_wnd = n_packs
+
+    def crnt_rcv_wnd(self, data, MTU):
+        self.snd_wnd = int(MTU / len(data))
 
     def max_packages(self, MTU):
         return int(self.MAX_SIZE / MTU)
