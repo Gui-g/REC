@@ -1,5 +1,7 @@
+from headerTCP import header
+
 class package:
-    def __init__(self, header, data):
+    def __init__(self, header : header, data):
         self.header = header
         self.data = data
 

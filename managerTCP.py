@@ -2,42 +2,209 @@ from os import curdir
 from headerTCP import header
 from bufferTCP import buffer
 from packTCP import package
-import time
-
-
-
+import multiprocessing.pool
+import functools
+import socket
+import operator
 
 class manager:
     def __init__(self):
         self.manager_buffer = buffer(4096)
         self.connection_control = 0
         self.MTU = 100
+        self.server_adress : tuple
+        self.socket : socket
+        self.full_data = ''
 
-    def byte_my_pack(self, pack):
+    def create_socket(self):
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def close_socket(self):
+        self.socket.close()
+
+    def create_connection(self, IP, PORT):
+        self.server_adress = (IP, PORT)
+        self.socket.bind(self.server_adress)
+
+    def client_send_package(self, data):
+        #build buffer
+        self.manager_buffer = self.build_client_buffer(data)
+        
+        #send SYN
+        self.manager_buffer.data_list[0] = self.client_pack(self.manager_buffer.data_list[0])
+        self.send_data(self.manager_buffer.data_list[0], self.server_adress)
+        self.manager_buffer.snd_una = self.manager_buffer.snd_una + 1
+
+        #receive SYN response
+        response_syn, address = self.receive_data()
+        rsp_syn_pck = self.decode_pack(response_syn)
+
+        #CHECK SYNACK
+        if rsp_syn_pck.header.SYN and rsp_syn_pck.header.ACK:
+            self.manager_buffer.snd_nxt = self.manager_buffer.snd_nxt + 1
+            
+            final_package = 0
+            start = self.manager_buffer.snd_nxt
+
+            #while not over
+            while not final_package:
+
+                #send window
+                for i in range(start, start+self.manager_buffer.usable_wnd-1):
+                    self.manager_buffer.data_list[i] = self.client_pack(self.manager_buffer.data_list[i])
+                    self.send_data(self.manager_buffer.data_list[i], self.server_adress)
+                    self.manager_buffer.snd_nxt = self.manager_buffer.snd_nxt + 1
+                
+                #receive window
+                rsp_list = []
+                for i in range(0, self.manager_buffer.usable_wnd-1):
+                    #receive response
+                    print(i)
+                    response, address = self.receive_data()
+                    rsp_list.append(response)
+
+                #sort all responses by ack for window-checking
+                rsp_list = self.sort_b_list(rsp_list)
+
+                for response in rsp_list:
+                    response = self.decode_pack(response)
+
+                    #is response the expected ack?
+                    #yes => send unackowledged + 1, send next + 1
+                    #no => waste responses (think later what to do)
+                    if self.client_resp_pack(response.header.ACK):
+                        self.manager_buffer.snd_una = self.manager_buffer.snd_una + 1
+
+                        if response.header.FIN:
+                            final_package = 1
+                    else:
+                        continue
+
+                self.manager_buffer.usable_wnd = self.manager_buffer.snd_una + self.manager_buffer.snd_wnd - self.manager_buffer.snd_nxt
+                start = self.manager_buffer.snd_nxt
+        #NOT SYNACK? TO DO
+            
+
+    def server_get_package(self):
+        final_package = 0
+
+        #wait for SYN
+        syn_request, address = self.receive_data()
+        self.manager_buffer.snd_una = 0
+
+        #build answer => if SYN then SYNACK
+        answer = self.server_pack(syn_request)
+        ans_head = self.decode_header(answer)
+
+        #if SYNACK then
+        if ans_head.SYN and ans_head.ACK:
+            #answer SYNACK and begin
+            self.send_data(answer, address)
+            self.manager_buffer.snd_nxt = 1
+
+            #while package has not been fully assembled
+            while not final_package:
+
+                start = self.manager_buffer.snd_una
+                for i in range(0, self.manager_buffer.usable_wnd-1):
+                    data, address = self.receive_data()
+                    data = self.server_pack(data)
+                    
+                    #if pack is repeated ignore
+                    if not self.manager_buffer.data_list.count(data):
+                        self.manager_buffer.data_list.append(data)
+                        self.manager_buffer.snd_nxt = self.manager_buffer.snd_nxt + 1
+                    
+                        data_head = self.decode_header(data)
+
+                        if data_head.FIN:
+                            final_package = 1
+                    else:
+                        continue
+
+                self.manager_buffer.data_list = self.sort_b_list(self.manager_buffer.data_list)
+                #response window
+                #just send everything
+                for i in range(start, self.manager_buffer.snd_nxt-1):
+                    self.send_data(self.manager_buffer.data_list[i], address)
+                    self.manager_buffer.snd_una = self.manager_buffer.snd_una + 1
+
+                start = self.manager_buffer.snd_una 
+                self.manager_buffer.usable_wnd = self.manager_buffer.snd_una + self.manager_buffer.snd_wnd - self.manager_buffer.snd_nxt
+
+                #if window is full clear space by assembling
+                if self.manager_buffer.usable_wnd == 0:
+                    for data in self.manager_buffer.data_list:
+                        self.assemble_data(data)
+
+            for data in self.manager_buffer.data_list:
+                self.assemble_data(data)
+
+        self.manager_buffer.data_list.clear()
+        
+        print(self.full_data)
+        self.full_data = ""
+
+
+    def send_data(self, data, address):
+        data_header = self.decode_header(data)
+        
+        self.update_buffer(data_header.SEQ, data_header.LEN, 1)
+        
+        sent = self.socket.sendto(data, address)
+        print('sent {} bytes to {}'.format(sent, address))
+        print('sent {}'.format(data))
+
+    def receive_data(self):
+        data, address = self.socket.recvfrom(4096)
+        print('received {} bytes from {}'.format(len(data), address))
+        print('received {!r}'.format(data)) 
+
+        data_header = self.decode_header(data)
+
+        self.update_buffer(data_header.SEQ, data_header.LEN, 0)
+
+        return (data, address)
+#
+#    def timeout(max_timeout):
+#        """Timeout decorator, parameter in seconds."""
+#        def timeout_decorator(item):
+#            """Wrap the original function."""
+#            @functools.wraps(item)
+#            def func_wrapper(*args, **kwargs):
+#                """Closure for function."""
+#                pool = multiprocessing.pool.ThreadPool(processes=1)
+#                async_result = pool.apply_async(item, args, kwargs)
+#                # raises a TimeoutError if execution exceeds max_timeout
+#                return async_result.get(max_timeout)
+#            return func_wrapper
+#        return timeout_decorator
+#
+    def byte_my_pack(self, pack : package) -> bytes:
         byted = str(pack.data) + pack.header.get_string()
         return bytes(byted, 'utf-8')
 
-    def build_pack(self, header, data):
+    def build_pack(self, header : header, data) -> package:
         return package(header, data)
 
-    def decode_header(self, data):
+    def decode_header(self, data : bytes) -> header:
         data = data.decode('utf-8')
         data = data.split('#')
         header = self.build_header(data[1], data[2], data[3], data[4], data[5], data[6])
         return header
 
-    def decode_data(self, data):
+    def decode_data(self, data : bytes):
         data = data.decode('utf-8')
         data = data.split('#')
         return data[0]
 
-    def decode(self, data):
+    def decode_pack(self, data : bytes) -> package:
         decoded = package(self.decode_header(data), self.decode_data(data))
         return decoded
 
-    def build_header(self, SYN, SEQ, ACK, FIN, LEN, window):
+    def build_header(self, SYN, SEQ, ACK, FIN, LEN, RWND):
         new_header = header()
-        new_header.make_header([int(SYN), int(SEQ), int(ACK), int(FIN), int(LEN), int(window)])
+        new_header.make_header([int(SYN), int(SEQ), int(ACK), int(FIN), int(LEN), int(RWND)])
         return new_header
 
     def build_client_buffer(self, data):
@@ -58,6 +225,12 @@ class manager:
             self.manager_buffer.data_list.append(try_pack)
             return self.manager_buffer 
 
+    def assemble_data(self, data):
+        data_block = self.decode_data(data)
+        del self.manager_buffer.data_list[self.manager_buffer.data_list.index(data)]
+
+        self.full_data = self.full_data + data_block
+
     def connection_start(self, SEQ):
         fst_header = self.build_header(0,0,0,0,0,0)
         fst_header.make_SYN()
@@ -67,37 +240,43 @@ class manager:
         return self.byte_my_pack(fst_pack)
 
     def connection_end(self, data):
-        last = self.decode(data)
+        last = self.decode_pack(data)
         last.header.make_FIN()
         return self.byte_my_pack(last)
 
     def make_connection(self, data):
-        data = self.decode(data)
+        data = self.decode_pack(data)
+        #data.data = ""
 
         if data.header.SYN:
-            data.header.ACK = 1
+            data.header.ACK = self.manager_buffer.next_ack
             return self.byte_my_pack(self.build_pack(data.header, data.data))
         else:
             return self.byte_my_pack(self.build_pack(data.header, data.data))
 
-    def buffer_next_ack(self, size):
-        self.manager_buffer.expected_ack = self.manager_buffer.last_seq + size
-
-    #flag => 1 = client => update seq with next ack
+    #flag => 1 = client => update seq with next seq
     #2 = server => update ack with next ack
-    def update_pack(self, pack, flag):
-        if flag == 1:
-            pack.header.SEQ = self.manager_buffer.expected_ack
-            pack.header.ACK = self.manager_buffer.last_ack
-            pack.header.LEN = len(pack.data)
-        if flag == 2:
-            pack.header.ACK = self.manager_buffer.expected_ack
+    def update_pack(self, pack):
+            pack.header.SEQ = self.manager_buffer.next_seq
+            pack.header.ACK = self.manager_buffer.next_ack
             pack.header.LEN = len(pack.data)
 
-    def update_buffer(self, SEQ, LEN, ACK):
-        self.manager_buffer.last_seq = SEQ
-        self.manager_buffer.last_ack = ACK
-        self.buffer_next_ack(LEN)
+    #flag => 1 = sending (rdy next seq) ; 0 = receiving (rdy next ack)
+    def update_buffer(self, SEQ, LEN, flag):
+        if flag:
+            self.manager_buffer.next_seq = SEQ + LEN
+        else:
+            self.manager_buffer.next_ack = SEQ + LEN
+
+    def sort_b_list(self, b_list):
+        in_list = [self.decode_pack(x) for x in b_list]
+
+        #Procurar como sort ou mudar tudo depois
+        in_list.sort(key = lambda x: x.header.ACK)
+
+        b_list = [self.byte_my_pack(x) for x in in_list]
+
+        return b_list
 
     def switch_connection(self, state):
         if state:
@@ -106,59 +285,51 @@ class manager:
             self.connection_control = 1
 
     def server_pack(self, pack):
-        current_pack = self.decode(pack)
-        
-        self.update_buffer(current_pack.header.SEQ, current_pack.header.LEN, current_pack.header.ACK)
+        current_pack = self.decode_pack(pack)
+        #0 len response
+        #current_pack.data = ""
 
         #SYN package
-        if current_pack.header.FIN == 0 and self.connection_control == 0 and current_pack.header.SYN: 
+        if not current_pack.header.FIN and not self.connection_control and current_pack.header.SYN: 
             self.switch_connection(0)
             return self.make_connection(pack)
         #Not SYN not FIN
-        elif current_pack.header.FIN == 0 and self.connection_control:
-            self.update_pack(current_pack, 2)
+        elif not current_pack.header.FIN and self.connection_control:
+            self.update_pack(current_pack)
             return self.byte_my_pack(current_pack)
         #FIN package
         else:
-            self.update_pack(current_pack, 2)
+            self.update_pack(current_pack)
             self.switch_connection(1)
             return self.byte_my_pack(current_pack)
 
+    #@timeout(5.0)
     def client_pack(self, pack):
-        current_pack = self.decode(pack)
+        current_pack = self.decode_pack(pack)
 
         #SYN package => LEN doesn't matter, already has SEQ
-        if current_pack.header.SYN and self.connection_control == 0:
-            self.update_buffer(current_pack.header.SEQ, 0, current_pack.header.ACK)
+        if current_pack.header.SYN and not self.connection_control:
             self.switch_connection(0)
             return pack
-        elif current_pack.header.FIN == 0 and self.connection_control:
-            self.update_pack(current_pack, 1)
-            self.update_buffer(current_pack.header.SEQ, current_pack.header.LEN, current_pack.header.ACK)
+        elif not current_pack.header.FIN and self.connection_control:
+            self.update_pack(current_pack)
             return self.byte_my_pack(current_pack)
         elif current_pack.header.FIN:
             self.switch_connection(1)
-            self.update_pack(current_pack, 1)
-            self.update_buffer(current_pack.header.SEQ, current_pack.header.LEN, current_pack.header.ACK)
+            self.update_pack(current_pack)
             return self.byte_my_pack(current_pack)
 
-    def client_resp_pack(self, response):
-        current_pack = self.decode(response)
+    def client_resp_pack(self, ACK):
+        expected_rsp = self.decode_header(self.manager_buffer.data_list[self.manager_buffer.snd_una])
 
-        print(current_pack.header.ACK)
-        print(self.manager_buffer.expected_ack)
-        if current_pack.header.ACK != self.manager_buffer.expected_ack:
+        if ACK != (expected_rsp.SEQ + expected_rsp.LEN):
             return 0
         else:
             return 1
-            
-def timeout():
-    print('Starting function timeout()...')
-    while True:
-        time.sleep(1)
-        print(next(counter))    
 
-    return
+
+
+    
 
 #metodo 1 pré-response
 #lê dado, sem seq, len, ack

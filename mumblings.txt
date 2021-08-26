@@ -1,0 +1,17 @@
+TODO:
+Tirar LEN da resposta do server (enviar só header)
+Inverter header data
+
+----------------------------------------------------------------------------------
+
+cliente => manda uma string => fragmenta (MTU) => envia em janelas => recebe em janelas
+server => recebe janelas => envia janelas
+
+ack, seq, len = ok
+ordena pacotes = ok
+
+------------------------------------------------------------------------------------
+
+TODO:
+implementar tamanho da janela
+implementar slow start + fast rec (<< timeout)

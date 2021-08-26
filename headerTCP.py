@@ -5,7 +5,7 @@ class header:
         self.ACK = 0
         self.FIN = 0
         self.LEN = 0
-        self.window = 0
+        self.RWND = 0
 
     def make_SYN(self):
         self.SYN = 1
@@ -25,7 +25,7 @@ class header:
         self.ACK = header[2]
         self.FIN = header[3]
         self.LEN = header[4]
-        self.window = header[5]
+        self.RWND = header[5]
 
     def get_string(self):
-        return str('#' + str(self.SYN) + '#' + str(self.SEQ) + '#' + str(self.ACK) + '#' + str(self.FIN) + '#' + str(self.LEN) + '#' + str(self.window))
+        return str('#' + str(self.SYN) + '#' + str(self.SEQ) + '#' + str(self.ACK) + '#' + str(self.FIN) + '#' + str(self.LEN) + '#' + str(self.RWND))
